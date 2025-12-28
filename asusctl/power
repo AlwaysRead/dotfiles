@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+
+STATE="$HOME/.cache/powermode/current"
+mkdir -p "$(dirname "$STATE")"
+touch "$STATE"
+
+# Status query mode (for Waybar tooltip)
+if [ "$1" = "status" ]; then
+    mode=$(cat "$STATE" 2>/dev/null)
+
+    case "$mode" in
+      quiet) label="Quiet Mode" ;;
+      balanced) label="Balanced Mode" ;;
+      performance) label="Performance Mode" ;;
+      turbo) label="Turbo Mode" ;;
+      *) label="Unknown Mode" ;;
+    esac
+
+    printf '{"text":"","tooltip":"%s"}' "$label"
+    exit 0
+fi
+
+apply_fw() {
+    asusctl profile -P "$1"
+    echo "$1" | tee /sys/firmware/acpi/platform_profile >/dev/null
+}
+
+# Real Ryzen power control (amd-pstate-epp)
+set_epp() {
+    for p in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
+        echo "$1" | tee "$p" >/dev/null
+    done
+}
+
+# Auto Restore Mode
+if [ "$1" = "restore" ]; then
+    mode=$(cat "$STATE")
+
+    case "$mode" in
+      quiet)
+        apply_fw quiet
+        set_epp power
+        supergfxctl -m Integrated
+        ;;
+
+      balanced)
+        apply_fw balanced
+        set_epp balance_performance
+        supergfxctl -m Hybrid
+        ;;
+
+      performance)
+        apply_fw performance
+        set_epp balance_performance
+        supergfxctl -m Hybrid
+        ;;
+
+      turbo)
+        apply_fw performance
+        set_epp performance
+
+        asusctl fan-curve -m performance -e true
+        asusctl fan-curve -m performance -E true -f cpu
+        asusctl fan-curve -m performance -E true -f gpu
+
+        echo 0 | tee /sys/module/pcie_aspm/parameters/policy >/dev/null
+        asusctl charge -l 100
+        supergfxctl -m Hybrid
+        ;;
+    esac
+    exit 0
+fi
+
+# Menu Mode
+
+fw=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)
+last=$(cat "$STATE" 2>/dev/null)
+
+menu="Quiet\nBalanced\nPerformance\nTurbo Mode"
+
+menu=$(echo -e "$menu" | while read line; do
+    case "$line:$fw:$last" in
+        Quiet:quiet:*) echo "● Quiet" ;;
+        Balanced:balanced:*) echo "● Balanced" ;;
+        Performance:performance:performance) echo "● Performance" ;;
+        "Turbo Mode:performance:turbo") echo "● Turbo Mode" ;;
+        *) echo "○ $line" ;;
+    esac
+done)
+
+choice=$(printf "%b" "$menu" | walker -d -p "Power Mode")
+choice=$(echo "$choice" | sed 's/^[●○] //')
+
+case "$choice" in
+  Quiet*)
+    apply_fw quiet
+    echo quiet > "$STATE"
+    set_epp power
+    supergfxctl -m Integrated
+    notify-send "Quiet mode"
+    ;;
+
+  Balanced*)
+    apply_fw balanced
+    echo balanced > "$STATE"
+    set_epp balance_performance
+    supergfxctl -m Hybrid
+    notify-send "Balanced mode"
+    ;;
+
+  Performance*)
+    apply_fw performance
+    echo performance > "$STATE"
+    set_epp balance_performance
+    supergfxctl -m Hybrid
+    notify-send "Performance mode"
+    ;;
+
+  "Turbo Mode"*)
+    apply_fw performance
+    echo turbo > "$STATE"
+    set_epp performance
+
+    asusctl fan-curve -m performance -e true
+    asusctl fan-curve -m performance -E true -f cpu
+    asusctl fan-curve -m performance -E true -f gpu
+
+    echo 0 | tee /sys/module/pcie_aspm/parameters/policy >/dev/null
+    asusctl charge -l 100
+    nvidia-smi -pm 1 >/dev/null 2>&1
+    nvidia-settings -a "[gpu:0]/GpuPowerMizerMode=1" >/dev/null 2>&1
+    supergfxctl -m Hybrid
+
+    notify-send "Turbo mode"
+    ;;
+esac
+
